@@ -1,18 +1,28 @@
-from strands import Agent, tool
-from strands_tools import current_time, python_repl
+import os
+from strands import Agent
+from strands.models.openai import OpenAIModel
+from strands_tools import calculator
 
-@tool
-def letter_counter(word: str, letter: str) -> int:
-    return word.lower().count(letter.lower())
+# Read API key from env var (fail fast if missing)
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise EnvironmentError(
+        "OPENAI_API_KEY is not set. Export it first, e.g.:\n"
+        "  # macOS/Linux (zsh/bash)\n"
+        "  export OPENAI_API_KEY=sk-... \n"
+        "  # Windows PowerShell\n"
+        "  $env:OPENAI_API_KEY='sk-...'\n"
+    )
 
-agent = Agent(tools=[current_time, python_repl, letter_counter])
+model = OpenAIModel(
+    client_args={"api_key": api_key},
+    model_id="gpt-4o",
+    params={
+        "max_tokens": 1000,
+        "temperature": 0.7,
+    },
+)
 
-message = """
-いくつか質問があります。
-
-1. いま日本は何時？
-2. その時刻表示の中に「1」はいくつある？
-3. ここまで話した内容をPyhtonコードにして。テストしたあとにコード内容を表示して。
-"""
-
-agent(message)
+agent = Agent(model=model, tools=[calculator])
+response = agent("What is 2+2")
+print(response)
