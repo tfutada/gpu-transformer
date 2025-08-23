@@ -1,4 +1,3 @@
-# gpu_check_japanese_hf.py
 import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
