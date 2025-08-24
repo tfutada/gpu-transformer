@@ -1,4 +1,4 @@
-# hf_gemma3_270m_auth.py
+# transformer_gemma_plain.py
 import os
 import sys
 import torch
@@ -7,32 +7,24 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 MODEL_ID = "google/gemma-3-270m"
 
 
-def assert_device():
+def pick_device_dtype():
     if torch.cuda.is_available():
-        print(f"[OK] CUDA available: {torch.version.cuda}, {torch.cuda.get_device_name(0)}")
+        name = torch.cuda.get_device_name(0)
+        print(f"[OK] CUDA available: {torch.version.cuda}, {name}")
         return torch.device("cuda:0"), torch.float16
     print("[WARN] CUDA not available; running on CPU.")
     return torch.device("cpu"), torch.float32
 
 
-def require_token() -> str:
-    token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
-    if not token:
-        print(
-            "ERROR: No Hugging Face token found. Set one of:\n"
-            "  export HUGGINGFACE_HUB_TOKEN=hf_xxx\n"
-            "  (or) export HF_TOKEN=hf_xxx\n",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return token
+def get_hf_token():
+    return os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
 
 
 def main():
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    device, dtype = assert_device()
-    token = require_token()
+    device, dtype = pick_device_dtype()
+    token = get_hf_token()  # Needed if the model is gated-by-terms/approval
 
     print(f"[INFO] Loading tokenizer: {MODEL_ID}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True, token=token)
@@ -44,30 +36,22 @@ def main():
     print(f"[INFO] Loading model: {MODEL_ID}")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        token=token,  # <<< important for gated repos
+        token=token,
         torch_dtype=dtype,
         device_map="auto" if device.type == "cuda" else None,
         low_cpu_mem_usage=True,
     )
 
-    GEMMA_CHAT_TEMPLATE = """{% for m in messages -%}
-    <start_of_turn>{{ m['role'] }}
-    {{ m['content'] }}<end_of_turn>
-    {%- endfor -%}
-    <start_of_turn>model
-    """
-
-    messages = [{"role": "user", "content": "日本食の特徴は何ですか？"}]
-
-    input_ids = tokenizer.apply_chat_template(
-        messages,
-        chat_template=GEMMA_CHAT_TEMPLATE,  # <<< provide it here
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to(model.device)
+    # ---------- Plain prompt (no chat template) ----------
+    prompt = (
+        "次の質問に日本語で簡潔に答えてください。\n"
+        "質問: 日本食の特徴は何ですか？\n"
+        "回答:"
+    )
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     gen_kwargs = dict(
-        max_new_tokens=200,  # increase if your outputs truncate
+        max_new_tokens=200,  # ← 長いときは増やす（例: 400–600）
         do_sample=True,
         temperature=0.7,
         top_p=0.9,
@@ -77,11 +61,19 @@ def main():
 
     model.eval()
     with torch.inference_mode():
-        output_ids = model.generate(input_ids, **gen_kwargs)
+        output_ids = model.generate(**inputs, **gen_kwargs)
 
     text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    print("\n--- Generation ---")
-    print(text)
+
+    # ちょっと後処理：先頭のプロンプトを取り除いて回答だけ表示（完全一致で安全に切り出し）
+    if text.startswith(prompt):
+        answer = text[len(prompt):].lstrip()
+    else:
+        # 念のためフォールバック
+        answer = text
+
+    print("\n--- Answer ---")
+    print(answer)
 
     if device.type == "cuda":
         torch.cuda.synchronize()
