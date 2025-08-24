@@ -38,7 +38,7 @@ def main():
     print(f"[OK] Model loaded on {p.device}, dtype={p.dtype}")
 
     # Simple Japanese prompt (no [MASK] — this is causal generation)
-    prompt = "以下の質問に日本語で簡潔に答えてください。\n質問: 量子コンピュータの利点は何ですか？\n回答:"
+    prompt = "以下の質問に日本語で簡潔に答えてください。\n質問: 日本食の特徴は何ですか？\n回答:"
 
     inputs = tokenizer(
         prompt,
