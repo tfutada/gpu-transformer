@@ -1,52 +1,67 @@
-# hf_gemma_3_270m_gpu_check.py
+# hf_gemma3_270m_auth.py
 import os
+import sys
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "google/gemma-3-270m"
 
 
-def assert_cuda():
-    if not torch.cuda.is_available():
-        print("[WARN] CUDA is NOT available, running on CPU.")
-        return None
-    print(f"[OK] CUDA available: {torch.version.cuda}, device count={torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        print(f"    - device {i}: {torch.cuda.get_device_name(i)}")
-    return torch.device("cuda:0")
+def assert_device():
+    if torch.cuda.is_available():
+        print(f"[OK] CUDA available: {torch.version.cuda}, {torch.cuda.get_device_name(0)}")
+        return torch.device("cuda:0"), torch.float16
+    print("[WARN] CUDA not available; running on CPU.")
+    return torch.device("cpu"), torch.float32
+
+
+def require_token() -> str:
+    token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+    if not token:
+        print(
+            "ERROR: No Hugging Face token found. Set one of:\n"
+            "  export HUGGINGFACE_HUB_TOKEN=hf_xxx\n"
+            "  (or) export HF_TOKEN=hf_xxx\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return token
 
 
 def main():
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    device = assert_cuda()
-    if device is None:
-        device = torch.device("cpu")
+
+    device, dtype = assert_device()
+    token = require_token()
 
     print(f"[INFO] Loading tokenizer: {MODEL_ID}")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True, token=token)
 
+    # Ensure pad token exists for decoder-only models
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     print(f"[INFO] Loading model: {MODEL_ID}")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+        token=token,  # <<< important for gated repos
+        torch_dtype=dtype,
         device_map="auto" if device.type == "cuda" else None,
+        low_cpu_mem_usage=True,
     )
 
-    # Build input using Gemma's chat template
+    # Build a simple chat using Gemma's chat template
     messages = [
-        {"role": "user", "content": "日本食の特徴は何ですか？"}
+        {"role": "user", "content": "以下の質問に日本語で簡潔に答えてください。日本食の特徴は何ですか？"}
     ]
     inputs = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
-        return_tensors="pt"
+        return_tensors="pt",
     ).to(model.device)
 
     gen_kwargs = dict(
-        max_new_tokens=128,
+        max_new_tokens=200,  # increase if your outputs truncate
         do_sample=True,
         temperature=0.7,
         top_p=0.9,
@@ -59,15 +74,14 @@ def main():
         output_ids = model.generate(inputs, **gen_kwargs)
 
     text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
     print("\n--- Generation ---")
     print(text)
 
     if device.type == "cuda":
         torch.cuda.synchronize()
-        mem_mb = torch.cuda.memory_allocated(device) / (1024 ** 2)
-        peak_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-        print(f"\n[OK] GPU memory (current/peak): {mem_mb:.1f} / {peak_mb:.1f} MiB on {torch.cuda.get_device_name(0)}")
+        cur = torch.cuda.memory_allocated(device) / (1024 ** 2)
+        peak = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+        print(f"\n[OK] GPU memory (current/peak): {cur:.1f}/{peak:.1f} MiB on {torch.cuda.get_device_name(0)}")
 
 
 if __name__ == "__main__":
