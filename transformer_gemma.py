@@ -1,4 +1,4 @@
-# transformer_gemma_plain.py
+# transformer_gemma_simple.py
 import os
 import sys
 import torch
@@ -11,25 +11,28 @@ def pick_device_dtype():
     if torch.cuda.is_available():
         name = torch.cuda.get_device_name(0)
         print(f"[OK] CUDA available: {torch.version.cuda}, {name}")
-        return torch.device("cuda:0"), torch.float16
+        # Use fp32 by default to avoid NaN/Inf issues on T4
+        return torch.device("cuda:0"), torch.float32
     print("[WARN] CUDA not available; running on CPU.")
     return torch.device("cpu"), torch.float32
 
 
-def get_hf_token():
-    return os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+def get_hf_token_or_die():
+    token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+    if not token:
+        print("ERROR: Set HUGGINGFACE_HUB_TOKEN (or HF_TOKEN) for gated repos.", file=sys.stderr)
+        sys.exit(1)
+    return token
 
 
 def main():
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     device, dtype = pick_device_dtype()
-    token = get_hf_token()  # Needed if the model is gated-by-terms/approval
+    token = get_hf_token_or_die()
 
     print(f"[INFO] Loading tokenizer: {MODEL_ID}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True, token=token)
-
-    # Ensure pad token exists for decoder-only models
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -37,12 +40,12 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         token=token,
-        torch_dtype=dtype,
+        torch_dtype=dtype,  # fp32 for stability
         device_map="auto" if device.type == "cuda" else None,
         low_cpu_mem_usage=True,
     )
 
-    # ---------- Plain prompt (no chat template) ----------
+    # ----- Plain prompt (no chat template) -----
     prompt = (
         "次の質問に日本語で簡潔に答えてください。\n"
         "質問: 日本食の特徴は何ですか？\n"
@@ -51,10 +54,8 @@ def main():
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     gen_kwargs = dict(
-        max_new_tokens=200,  # ← 長いときは増やす（例: 400–600）
-        do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
+        max_new_tokens=200,  # increase if answer is cut off
+        do_sample=False,  # greedy decoding (stable)
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
@@ -65,12 +66,8 @@ def main():
 
     text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-    # ちょっと後処理：先頭のプロンプトを取り除いて回答だけ表示（完全一致で安全に切り出し）
-    if text.startswith(prompt):
-        answer = text[len(prompt):].lstrip()
-    else:
-        # 念のためフォールバック
-        answer = text
+    # Strip prompt for cleaner output
+    answer = text[len(prompt):].lstrip() if text.startswith(prompt) else text
 
     print("\n--- Answer ---")
     print(answer)
