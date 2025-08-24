@@ -50,12 +50,18 @@ def main():
         low_cpu_mem_usage=True,
     )
 
-    # Build a simple chat using Gemma's chat template
-    messages = [
-        {"role": "user", "content": "以下の質問に日本語で簡潔に答えてください。日本食の特徴は何ですか？"}
-    ]
-    inputs = tokenizer.apply_chat_template(
+    GEMMA_CHAT_TEMPLATE = """{% for m in messages -%}
+    <start_of_turn>{{ m['role'] }}
+    {{ m['content'] }}<end_of_turn>
+    {%- endfor -%}
+    <start_of_turn>model
+    """
+
+    messages = [{"role": "user", "content": "日本食の特徴は何ですか？"}]
+
+    input_ids = tokenizer.apply_chat_template(
         messages,
+        chat_template=GEMMA_CHAT_TEMPLATE,  # <<< provide it here
         add_generation_prompt=True,
         return_tensors="pt",
     ).to(model.device)
@@ -71,7 +77,7 @@ def main():
 
     model.eval()
     with torch.inference_mode():
-        output_ids = model.generate(inputs, **gen_kwargs)
+        output_ids = model.generate(input_ids, **gen_kwargs)
 
     text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
     print("\n--- Generation ---")
