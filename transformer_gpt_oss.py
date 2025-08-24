@@ -60,7 +60,7 @@ def main():
     with torch.inference_mode():
         output_ids = model.generate(
             prompt_ids,
-            max_new_tokens=160,
+            max_new_tokens=256,
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
