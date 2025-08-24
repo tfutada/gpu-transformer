@@ -13,5 +13,12 @@ inputs = tokenizer.apply_chat_template(
     return_tensors="pt",
 ).to(model.device)
 
-outputs = model.generate(**inputs, max_new_tokens=40)
+outputs = model.generate(**inputs,
+                         max_new_tokens=256,
+                         do_sample=True,
+                         temperature=0.8,
+                         top_p=0.95,
+                         repetition_penalty=1.2
+                         )
+
 print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
