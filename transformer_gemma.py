@@ -1,83 +1,64 @@
-# transformer_gemma_simple.py
+# gemma3_270m_it_chat.py
 import os
-import sys
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-MODEL_ID = "google/gemma-3-270m"
+MODEL_ID = "google/gemma-3-270m-it"  # if this is gated, set HUGGINGFACE_HUB_TOKEN
+HF_TOKEN = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
 
+# Prefer fp32 for small models (stable on T4)
+dtype = torch.float32
+use_gpu = torch.cuda.is_available()
 
-def pick_device_dtype():
-    if torch.cuda.is_available():
-        name = torch.cuda.get_device_name(0)
-        print(f"[OK] CUDA available: {torch.version.cuda}, {name}")
-        # Use fp32 by default to avoid NaN/Inf issues on T4
-        return torch.device("cuda:0"), torch.float32
-    print("[WARN] CUDA not available; running on CPU.")
-    return torch.device("cpu"), torch.float32
+print(f"[INFO] CUDA: {torch.version.cuda if use_gpu else 'N/A'}, GPU={torch.cuda.get_device_name(0) if use_gpu else 'CPU'}")
 
+print(f"[INFO] Loading tokenizer: {MODEL_ID}")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True, token=HF_TOKEN)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
-def get_hf_token_or_die():
-    token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
-    if not token:
-        print("ERROR: Set HUGGINGFACE_HUB_TOKEN (or HF_TOKEN) for gated repos.", file=sys.stderr)
-        sys.exit(1)
-    return token
+print(f"[INFO] Loading model: {MODEL_ID}")
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    token=HF_TOKEN,
+    torch_dtype=dtype,
+    device_map="auto" if use_gpu else None,  # place on GPU if available
+    low_cpu_mem_usage=True,
+)
+model.eval()
 
+# Determine the device the model lives on (works with device_map="auto")
+model_device = next(model.parameters()).device
 
-def main():
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+messages = [
+    {"role": "user", "content": "以下の質問に日本語で簡潔に答えてください。日本食の特徴は何ですか？"},
+]
 
-    device, dtype = pick_device_dtype()
-    token = get_hf_token_or_die()
+# Use the model's chat template
+inputs = tokenizer.apply_chat_template(
+    messages,
+    add_generation_prompt=True,
+    tokenize=True,
+    return_tensors="pt",
+)
 
-    print(f"[INFO] Loading tokenizer: {MODEL_ID}")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True, token=token)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+# Move tensors to the model device
+inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
-    print(f"[INFO] Loading model: {MODEL_ID}")
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        token=token,
-        torch_dtype=dtype,  # fp32 for stability
-        device_map="auto" if device.type == "cuda" else None,
-        low_cpu_mem_usage=True,
-    )
+# Safer generation defaults for small chat models
+gen_kwargs = dict(
+    max_new_tokens=128,
+    do_sample=True,         # better fluency than greedy
+    temperature=0.8,        # 0.6–1.0 reasonable
+    top_p=0.9,
+    eos_token_id=tokenizer.eos_token_id,
+    pad_token_id=tokenizer.pad_token_id,
+)
 
-    # ----- Plain prompt (no chat template) -----
-    prompt = (
-        "次の質問に日本語で簡潔に答えてください。\n"
-        "質問: 日本食の特徴は何ですか？\n"
-        "回答:"
-    )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+with torch.inference_mode():
+    outputs = model.generate(**inputs, **gen_kwargs)
 
-    gen_kwargs = dict(
-        max_new_tokens=200,  # increase if answer is cut off
-        do_sample=False,  # greedy decoding (stable)
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-
-    model.eval()
-    with torch.inference_mode():
-        output_ids = model.generate(**inputs, **gen_kwargs)
-
-    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
-    # Strip prompt for cleaner output
-    answer = text[len(prompt):].lstrip() if text.startswith(prompt) else text
-
-    print("\n--- Answer ---")
-    print(answer)
-
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-        cur = torch.cuda.memory_allocated(device) / (1024 ** 2)
-        peak = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-        print(f"\n[OK] GPU memory (current/peak): {cur:.1f}/{peak:.1f} MiB on {torch.cuda.get_device_name(0)}")
-
-
-if __name__ == "__main__":
-    main()
+# Only decode the newly generated tokens
+prompt_len = inputs["input_ids"].shape[1]
+generated = outputs[0][prompt_len:]
+print(tokenizer.decode(generated, skip_special_tokens=True))
